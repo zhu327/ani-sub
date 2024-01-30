@@ -1,39 +1,40 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use futures;
+use reqwest::header;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
-use reqwest::blocking::Client;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Config {
     prowlarr: Prowlarr,
     ntfy: Ntfy,
     animes: Vec<Anime>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Prowlarr {
     url: String,
     api_key: String,
     indexer: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Ntfy {
     enable: bool,
     topic: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Anime {
     keywords: String,
     exclude_keywords: String,
 }
 
-fn read_config_file(file_path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
+async fn read_config_file(file_path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
     // 读取配置文件内容
-    let config_content = std::fs::read_to_string(file_path)?;
+    let config_content = tokio::fs::read_to_string(file_path).await?;
 
     // 解析配置文件内容为结构体
     let config: Config = serde_yaml::from_str(&config_content)?;
@@ -48,7 +49,7 @@ struct SearchResult {
     guid: String,
 }
 
-fn search(prowlarr: &Prowlarr, keywords: &str) -> Result<Vec<SearchResult>, reqwest::Error> {
+async fn search(prowlarr: &Prowlarr, keywords: &str) -> Result<Vec<SearchResult>, reqwest::Error> {
     let url = format!("{}/api/v1/search", prowlarr.url);
 
     let params = [
@@ -56,18 +57,18 @@ fn search(prowlarr: &Prowlarr, keywords: &str) -> Result<Vec<SearchResult>, reqw
         ("indexerIds", &prowlarr.indexer.to_string()),
     ];
 
-    let client = Client::new();
+    let client = reqwest::Client::new();
     let response = client
         .get(&url)
         .query(&params)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/json")
         .header("X-Api-Key", &prowlarr.api_key)
-        .send()?;
+        .send()
+        .await?
+        .error_for_status()?;
 
-    response.error_for_status_ref()?;
-
-    let result: Vec<SearchResult> = response.json()?;
+    let result: Vec<SearchResult> = response.json().await?;
     Ok(result)
 }
 
@@ -82,7 +83,7 @@ struct HistoryResult {
     successful: bool,
 }
 
-fn history(prowlarr: &Prowlarr) -> Result<Vec<HistoryResult>, reqwest::Error> {
+async fn history(prowlarr: &Prowlarr) -> Result<Vec<HistoryResult>, reqwest::Error> {
     let url = format!("{}/api/v1/history/indexer", prowlarr.url);
 
     let params = [
@@ -91,16 +92,18 @@ fn history(prowlarr: &Prowlarr) -> Result<Vec<HistoryResult>, reqwest::Error> {
         ("limit", &"100".to_string()),
     ];
 
-    let client = Client::new();
+    let client = reqwest::Client::new();
     let result: Vec<HistoryResult> = client
         .get(&url)
         .query(&params)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/json")
         .header("X-Api-Key", &prowlarr.api_key)
-        .send()?
+        .send()
+        .await?
         .error_for_status()?
-        .json()?;
+        .json()
+        .await?;
 
     Ok(result)
 }
@@ -113,7 +116,7 @@ struct DownloadRequest {
     indexerId: u32,
 }
 
-fn download(prowlarr: &Prowlarr, guid: &str) -> Result<(), reqwest::Error> {
+async fn download(prowlarr: &Prowlarr, guid: &str) -> Result<(), reqwest::Error> {
     let url = format!("{}/api/v1/search", prowlarr.url);
 
     let request_body = DownloadRequest {
@@ -121,30 +124,30 @@ fn download(prowlarr: &Prowlarr, guid: &str) -> Result<(), reqwest::Error> {
         indexerId: prowlarr.indexer,
     };
 
-    let client = Client::new();
-    let response = client
+    let client = reqwest::Client::new();
+    client
         .post(&url)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/json")
         .header("X-Api-Key", &prowlarr.api_key)
         .json(&request_body)
-        .send()?;
-
-    response.error_for_status_ref()?;
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
 
-fn send_message(ntfy: &Ntfy, message: &str) -> Result<(), reqwest::Error> {
+async fn send_message(ntfy: &Ntfy, message: &str) -> Result<(), reqwest::Error> {
     let url = format!("https://ntfy.sh/{}", ntfy.topic);
 
-    let client = Client::new();
-    let response = client
+    let client = reqwest::Client::new();
+    client
         .post(&url)
         .body(message.to_string())
-        .send()?;
-
-    response.error_for_status_ref()?;
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
@@ -165,42 +168,61 @@ struct Cli {
     config: std::path::PathBuf,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // 从命令行参数解析配置文件路径
     let args = Cli::from_args();
 
     // Load configuration file
-    let config = read_config_file(&args.config).unwrap();
+    let config = read_config_file(&args.config).await.unwrap();
 
     // Query existing download records
-    let histories = history(&config.prowlarr).unwrap();
+    let histories = history(&config.prowlarr).await.unwrap();
     let history_urls: HashSet<String> = histories
         .into_iter()
         .filter(|item| item.successful)
         .map(|item| item.data.url)
         .collect();
 
+    let mut tasks = vec![];
+
     for anime in &config.animes {
-        let items = search(&config.prowlarr, &anime.keywords).unwrap();
-        for item in items {
-            if item.age > 2 || match_exclude_keywords(&item.title, &anime.exclude_keywords) {
-                continue;
+        let anime = anime.clone();
+
+        let prowlarr = config.prowlarr.clone();
+        let ntfy = config.ntfy.clone();
+
+        let history_urls = history_urls.clone();
+
+        let task = tokio::spawn(async move {
+            let items = search(&prowlarr, &anime.keywords).await.unwrap();
+            for item in items {
+                if item.age > 2 || match_exclude_keywords(&item.title, &anime.exclude_keywords) {
+                    continue;
+                }
+
+                // Check if already downloaded
+                if history_urls.contains(&item.guid) {
+                    continue;
+                }
+
+                // Download
+                download(&prowlarr, &item.guid).await.unwrap();
+
+                // Notify
+                if ntfy.enable {
+                    send_message(&ntfy, &format!("Downloading {}", item.title))
+                        .await
+                        .unwrap();
+                }
+
+                break;
             }
+        });
 
-            // Check if already downloaded
-            if history_urls.contains(&item.guid) {
-                continue;
-            }
-
-            // Download
-            download(&config.prowlarr, &item.guid).unwrap();
-
-            // Notify
-            if config.ntfy.enable {
-                send_message(&config.ntfy, &format!("Downloading {}", item.title)).unwrap();
-            }
-
-            break;
-        }
+        tasks.push(task);
     }
+
+    // Wait for all tasks to complete
+    futures::future::join_all(tasks).await;
 }
