@@ -191,9 +191,7 @@ async fn main() {
 
     for anime in &config.animes {
         let anime = anime.clone();
-
         let config = config.clone();
-
         let history_urls = history_urls.clone();
 
         let task = tokio::spawn(async move {
