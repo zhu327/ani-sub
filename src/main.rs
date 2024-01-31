@@ -1,26 +1,27 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures;
 use reqwest::header;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct Config {
     prowlarr: Prowlarr,
     ntfy: Ntfy,
     animes: Vec<Anime>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct Prowlarr {
     url: String,
     api_key: String,
     indexer: u32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct Ntfy {
     enable: bool,
     topic: String,
@@ -175,6 +176,7 @@ async fn main() {
 
     // Load configuration file
     let config = read_config_file(&args.config).await.unwrap();
+    let config = Arc::new(config);
 
     // Query existing download records
     let histories = history(&config.prowlarr).await.unwrap();
@@ -183,19 +185,19 @@ async fn main() {
         .filter(|item| item.successful)
         .map(|item| item.data.url)
         .collect();
+    let history_urls = Arc::new(history_urls);
 
     let mut tasks = vec![];
 
     for anime in &config.animes {
         let anime = anime.clone();
 
-        let prowlarr = config.prowlarr.clone();
-        let ntfy = config.ntfy.clone();
+        let config = config.clone();
 
         let history_urls = history_urls.clone();
 
         let task = tokio::spawn(async move {
-            let items = search(&prowlarr, &anime.keywords).await.unwrap();
+            let items = search(&config.prowlarr, &anime.keywords).await.unwrap();
             for item in items {
                 if item.age > 2 || match_exclude_keywords(&item.title, &anime.exclude_keywords) {
                     continue;
@@ -207,11 +209,11 @@ async fn main() {
                 }
 
                 // Download
-                download(&prowlarr, &item.guid).await.unwrap();
+                download(&config.prowlarr, &item.guid).await.unwrap();
 
                 // Notify
-                if ntfy.enable {
-                    send_message(&ntfy, &format!("Downloading {}", item.title))
+                if config.ntfy.enable {
+                    send_message(&config.ntfy, &format!("Downloading {}", item.title))
                         .await
                         .unwrap();
                 }
