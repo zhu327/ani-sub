@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use futures;
 use reqwest::header;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
