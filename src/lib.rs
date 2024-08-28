@@ -193,7 +193,7 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
                 .unwrap(),
         },
         ntfy: Ntfy {
-            enable: env.var("NTFY_TOPIC").unwrap().to_string() != "",
+            enable: !env.var("NTFY_TOPIC").unwrap().to_string().trim().is_empty(),
             topic: env.var("NTFY_TOPIC").unwrap().to_string(),
         },
     };
