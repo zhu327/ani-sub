@@ -1,0 +1,29 @@
+[package]
+name = "workers-anime"
+version = "0.1.0"
+edition = "2021"
+authors = [ "zhu327" ]
+
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1247
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version="0.2.0", features = ["d1"] }
+worker-macros = { version="0.2.0" }
+console_error_panic_hook = { version = "0.1.1" }
+futures = "0.3"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
