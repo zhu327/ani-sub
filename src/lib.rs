@@ -25,7 +25,7 @@ struct Ntfy {
 struct Anime {
     keywords: String,
     exclude_keywords: String,
-    indexer: u32,
+    indexer: Option<u32>,
 }
 
 #[allow(warnings)]
@@ -40,14 +40,12 @@ struct SearchResult {
 
 async fn search(
     prowlarr: &Prowlarr,
-    mut indexer: u32,
+    indexer: Option<u32>,
     keywords: &str,
 ) -> Result<Vec<SearchResult>, reqwest::Error> {
     let url = format!("{}/api/v1/search", prowlarr.url);
 
-    if indexer == 0 {
-        indexer = prowlarr.indexer
-    }
+    let indexer = indexer.unwrap_or(prowlarr.indexer);
 
     let params = [("query", keywords), ("indexerIds", &indexer.to_string())];
 
@@ -118,12 +116,14 @@ struct DownloadRequest {
     indexerId: u32,
 }
 
-async fn download(prowlarr: &Prowlarr, mut indexer: u32, guid: &str) -> Result<(), reqwest::Error> {
+async fn download(
+    prowlarr: &Prowlarr,
+    indexer: Option<u32>,
+    guid: &str,
+) -> Result<(), reqwest::Error> {
     let url = format!("{}/api/v1/search", prowlarr.url);
 
-    if indexer == 0 {
-        indexer = prowlarr.indexer
-    }
+    let indexer = indexer.unwrap_or(prowlarr.indexer);
 
     let request_body = DownloadRequest {
         guid: guid.to_string(),
