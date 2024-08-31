@@ -25,6 +25,7 @@ struct Ntfy {
 struct Anime {
     keywords: String,
     exclude_keywords: String,
+    indexer: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,13 +35,18 @@ struct SearchResult {
     guid: String,
 }
 
-async fn search(prowlarr: &Prowlarr, keywords: &str) -> Result<Vec<SearchResult>, reqwest::Error> {
+async fn search(
+    prowlarr: &Prowlarr,
+    mut indexer: u32,
+    keywords: &str,
+) -> Result<Vec<SearchResult>, reqwest::Error> {
     let url = format!("{}/api/v1/search", prowlarr.url);
 
-    let params = [
-        ("query", keywords),
-        ("indexerIds", &prowlarr.indexer.to_string()),
-    ];
+    if indexer == 0 {
+        indexer = prowlarr.indexer
+    }
+
+    let params = [("query", keywords), ("indexerIds", &indexer.to_string())];
 
     let client = reqwest::Client::new();
     let response = client
@@ -152,7 +158,7 @@ async fn process_anime(
     config: Arc<&Config>,
     history_urls: Arc<HashSet<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let items = search(&config.prowlarr, &anime.keywords).await?;
+    let items = search(&config.prowlarr, anime.indexer, &anime.keywords).await?;
 
     for item in items {
         if item.age > 2 || match_exclude_keywords(&item.title, &anime.exclude_keywords) {
