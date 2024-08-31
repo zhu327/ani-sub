@@ -70,7 +70,7 @@ async fn search(
 #[warn(non_snake_case)]
 #[derive(Debug, Deserialize)]
 struct HistoryData {
-    infoUrl: String,
+    infoUrl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,7 +230,7 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     let history_urls: HashSet<String> = histories
         .into_iter()
         .filter(|item| item.successful)
-        .map(|item| item.data.infoUrl)
+        .filter_map(|item| item.data.infoUrl)
         .collect();
     let history_urls = Arc::new(history_urls);
 
