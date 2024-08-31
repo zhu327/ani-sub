@@ -170,7 +170,7 @@ fn match_exclude_keywords(title: &str, exclude_keywords: &str) -> bool {
 
 async fn process_anime(
     anime: Anime,
-    config: Arc<&Config>,
+    config: &Config,
     history_urls: Arc<HashSet<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let items = search(&config.prowlarr, anime.indexer, &anime.keywords).await?;
@@ -217,7 +217,6 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
             topic: env.var("NTFY_TOPIC").unwrap().to_string(),
         },
     };
-    let config = Arc::new(config);
 
     // 查询所有监听的动画片
     let d1 = env.d1("DB").unwrap();
@@ -238,7 +237,6 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     let mut tasks = Vec::new();
     for anime in animes {
         let anime = anime.clone();
-        let config = config.clone();
         let history_urls = history_urls.clone();
 
         // 为每个 anime 创建一个异步任务并添加到任务集合中
