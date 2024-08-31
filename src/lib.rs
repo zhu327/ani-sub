@@ -28,11 +28,14 @@ struct Anime {
     indexer: u32,
 }
 
+#[allow(warnings)]
+#[warn(non_snake_case)]
 #[derive(Debug, Deserialize)]
 struct SearchResult {
     age: u32,
     title: String,
     guid: String,
+    infoUrl: String,
 }
 
 async fn search(
@@ -63,28 +66,36 @@ async fn search(
     Ok(result)
 }
 
+#[allow(warnings)]
+#[warn(non_snake_case)]
 #[derive(Debug, Deserialize)]
 struct HistoryData {
-    url: String,
+    infoUrl: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct HistoryResult {
+struct HistoryItem {
     data: HistoryData,
     successful: bool,
 }
 
-async fn history(prowlarr: &Prowlarr) -> Result<Vec<HistoryResult>, reqwest::Error> {
-    let url = format!("{}/api/v1/history/indexer", prowlarr.url);
+#[derive(Debug, Deserialize)]
+struct HistoryResult {
+    records: Vec<HistoryItem>,
+}
+
+async fn history(prowlarr: &Prowlarr) -> Result<Vec<HistoryItem>, reqwest::Error> {
+    let url = format!("{}/api/v1/history", prowlarr.url);
 
     let params = [
-        ("indexerId", &prowlarr.indexer.to_string()),
-        ("eventType", &"releaseGrabbed".to_string()),
-        ("limit", &"100".to_string()),
+        ("eventType", &"1".to_string()),
+        ("successful", &"true".to_string()),
+        ("page", &"1".to_string()),
+        ("pageSize", &"100".to_string()),
     ];
 
     let client = reqwest::Client::new();
-    let result: Vec<HistoryResult> = client
+    let result: HistoryResult = client
         .get(&url)
         .query(&params)
         .header(header::ACCEPT, "application/json")
@@ -96,7 +107,7 @@ async fn history(prowlarr: &Prowlarr) -> Result<Vec<HistoryResult>, reqwest::Err
         .json()
         .await?;
 
-    Ok(result)
+    Ok(result.records)
 }
 
 #[allow(warnings)]
@@ -107,12 +118,16 @@ struct DownloadRequest {
     indexerId: u32,
 }
 
-async fn download(prowlarr: &Prowlarr, guid: &str) -> Result<(), reqwest::Error> {
+async fn download(prowlarr: &Prowlarr, mut indexer: u32, guid: &str) -> Result<(), reqwest::Error> {
     let url = format!("{}/api/v1/search", prowlarr.url);
+
+    if indexer == 0 {
+        indexer = prowlarr.indexer
+    }
 
     let request_body = DownloadRequest {
         guid: guid.to_string(),
-        indexerId: prowlarr.indexer,
+        indexerId: indexer,
     };
 
     let client = reqwest::Client::new();
@@ -159,19 +174,18 @@ async fn process_anime(
     history_urls: Arc<HashSet<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let items = search(&config.prowlarr, anime.indexer, &anime.keywords).await?;
-
     for item in items {
         if item.age > 2 || match_exclude_keywords(&item.title, &anime.exclude_keywords) {
             continue;
         }
 
         // Check if already downloaded
-        if history_urls.contains(&item.guid) {
+        if history_urls.contains(&item.infoUrl) {
             continue;
         }
 
         // Download
-        download(&config.prowlarr, &item.guid).await?;
+        download(&config.prowlarr, anime.indexer, &item.guid).await?;
 
         // Notify
         if config.ntfy.enable {
@@ -216,7 +230,7 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     let history_urls: HashSet<String> = histories
         .into_iter()
         .filter(|item| item.successful)
-        .map(|item| item.data.url)
+        .map(|item| item.data.infoUrl)
         .collect();
     let history_urls = Arc::new(history_urls);
 
