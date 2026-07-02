@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use reqwest::header;
 use serde::{Deserialize, Serialize};
@@ -161,10 +160,6 @@ async fn send_message(ntfy: &Ntfy, message: &str) -> std::result::Result<(), req
 }
 
 fn match_exclude_keywords(title: &str, exclude_keywords: &str) -> bool {
-    if exclude_keywords.is_empty() {
-        return false;
-    }
-
     exclude_keywords
         .split_whitespace()
         .any(|keyword| title.to_lowercase().contains(&keyword.to_lowercase()))
@@ -173,55 +168,28 @@ fn match_exclude_keywords(title: &str, exclude_keywords: &str) -> bool {
 async fn process_anime(
     anime: Anime,
     config: &Config,
-    history_urls: Arc<HashSet<String>>,
+    history_urls: &HashSet<String>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let items = search(&config.prowlarr, anime.indexer, &anime.keywords).await?;
     for item in items {
         if item.age > 2 || match_exclude_keywords(&item.title, &anime.exclude_keywords) {
             continue;
         }
-
-        // Check if already downloaded
         if history_urls.contains(&item.infoUrl) {
             continue;
         }
-
-        // Download
         download(&config.prowlarr, anime.indexer, &item.guid).await?;
-
-        // Notify
         if config.ntfy.enable {
             send_message(&config.ntfy, &format!("Downloading {}", item.title)).await?;
         }
-
         break;
     }
-
     Ok(())
 }
 
 // ============================================================================
 // Auth helpers
 // ============================================================================
-
-fn parse_cookies(header_value: &str) -> Vec<(&str, &str)> {
-    header_value
-        .split(';')
-        .filter_map(|cookie| {
-            let mut parts = cookie.trim().splitn(2, '=');
-            let key = parts.next()?.trim();
-            let value = parts.next()?.trim();
-            Some((key, value))
-        })
-        .collect()
-}
-
-fn get_session_cookie<'a>(cookies: &'a [(&'a str, &'a str)]) -> Option<&'a str> {
-    cookies
-        .iter()
-        .find(|(k, _)| *k == "session")
-        .map(|(_, v)| *v)
-}
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
@@ -235,10 +203,35 @@ fn is_authenticated(req: &Request, password: &str) -> bool {
         Ok(Some(h)) => h,
         _ => return false,
     };
-    let cookies = parse_cookies(&cookie_header);
-    get_session_cookie(&cookies)
-        .map(|s| constant_time_eq(s, password))
+    cookie_header
+        .split(';')
+        .filter_map(|c| {
+            let mut parts = c.trim().splitn(2, '=');
+            Some((parts.next()?.trim(), parts.next()?.trim()))
+        })
+        .find(|(k, _)| *k == "session")
+        .map(|(_, v)| constant_time_eq(v, password))
         .unwrap_or(false)
+}
+
+// ============================================================================
+// Response helpers
+// ============================================================================
+
+fn json_ok(data: &impl Serialize) -> worker::Result<Response> {
+    Response::from_json(data)
+}
+
+fn json_err(msg: &str, status: u16) -> worker::Result<Response> {
+    Response::from_json(&serde_json::json!({"ok": false, "error": msg}))
+        .map(|r| r.with_status(status))
+}
+
+fn parse_id(ctx: &RouteContext<()>) -> worker::Result<i32> {
+    ctx.param("id")
+        .ok_or_else(|| worker::Error::RustError("missing id".into()))?
+        .parse()
+        .map_err(|_| worker::Error::RustError("invalid id".into()))
 }
 
 // ============================================================================
@@ -266,19 +259,13 @@ async fn handle_login(mut req: Request, env: Env) -> worker::Result<Response> {
     let password = env.var("AUTH_PASSWORD")?.to_string();
 
     if !constant_time_eq(&body.password, &password) {
-        return Response::from_json(&serde_json::json!({"ok": false, "error": "密码错误"}))
-            .map(|r| r.with_status(401));
+        return json_err("密码错误", 401);
     }
 
-    let cookie = format!(
-        "session={}; HttpOnly; Secure; SameSite=Strict; Path=/",
-        body.password
-    );
+    let cookie = format!("session={}; HttpOnly; Secure; SameSite=Strict; Path=/", body.password);
     let mut headers = worker::Headers::new();
     headers.set("Set-Cookie", &cookie)?;
-
-    Response::from_json(&serde_json::json!({"ok": true}))
-        .map(|r| r.with_headers(headers))
+    json_ok(&serde_json::json!({"ok": true})).map(|r| r.with_headers(headers))
 }
 
 async fn handle_logout(_req: Request) -> worker::Result<Response> {
@@ -287,7 +274,6 @@ async fn handle_logout(_req: Request) -> worker::Result<Response> {
         "Set-Cookie",
         "session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
     )?;
-
     Response::empty().map(|r| r.with_headers(headers))
 }
 
@@ -297,36 +283,27 @@ async fn handle_index(_req: Request, _ctx: RouteContext<()>) -> worker::Result<R
 
 async fn handle_anime_list(_req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
     let d1 = ctx.d1("DB")?;
-    let result = d1.prepare("SELECT * FROM anime").all().await?;
-    let animes: Vec<Anime> = result.results::<Anime>()?;
-    Response::from_json(&serde_json::json!({"ok": true, "data": animes}))
+    let animes: Vec<Anime> = d1.prepare("SELECT * FROM anime").all().await?.results::<Anime>()?;
+    json_ok(&serde_json::json!({"ok": true, "data": animes}))
 }
 
 fn anime_params(input: &AnimeInput) -> [JsValue; 3] {
-    let indexer_val = match input.indexer {
-        Some(i) => JsValue::from_f64(i as f64),
-        None => JsValue::null(),
-    };
     [
         JsValue::from_str(&input.keywords),
         JsValue::from_str(input.exclude_keywords.as_deref().unwrap_or_default()),
-        indexer_val,
+        input.indexer.map(|i| JsValue::from_f64(i as f64)).unwrap_or(JsValue::null()),
     ]
 }
 
 async fn handle_anime_create(mut req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
     let input: AnimeInput = req.json().await?;
-
     if input.keywords.trim().is_empty() {
-        return Response::from_json(&serde_json::json!({"ok": false, "error": "keywords不能为空"}))
-            .map(|r| r.with_status(400));
+        return json_err("keywords不能为空", 400);
     }
 
     let d1 = ctx.d1("DB")?;
-    let params = anime_params(&input);
-
     d1.prepare("INSERT INTO anime (keywords, exclude_keywords, indexer) VALUES (?, ?, ?)")
-        .bind(&params)?
+        .bind(&anime_params(&input))?
         .run()
         .await?;
 
@@ -334,30 +311,22 @@ async fn handle_anime_create(mut req: Request, ctx: RouteContext<()>) -> worker:
         .prepare("SELECT * FROM anime WHERE id = last_insert_rowid()")
         .first::<Anime>(None)
         .await?;
-
-    Response::from_json(&serde_json::json!({"ok": true, "data": anime}))
+    json_ok(&serde_json::json!({"ok": true, "data": anime}))
 }
 
 async fn handle_anime_update(mut req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
-    let id: i32 = ctx
-        .param("id")
-        .ok_or_else(|| worker::Error::RustError("missing id".into()))?
-        .parse()
-        .map_err(|_| worker::Error::RustError("invalid id".into()))?;
-
+    let id = parse_id(&ctx)?;
     let input: AnimeInput = req.json().await?;
-
     if input.keywords.trim().is_empty() {
-        return Response::from_json(&serde_json::json!({"ok": false, "error": "keywords不能为空"}))
-            .map(|r| r.with_status(400));
+        return json_err("keywords不能为空", 400);
     }
 
     let d1 = ctx.d1("DB")?;
-    let mut params_vec: Vec<JsValue> = anime_params(&input).into();
-    params_vec.push(JsValue::from_f64(id as f64));
+    let mut params: Vec<JsValue> = anime_params(&input).into();
+    params.push(JsValue::from_f64(id as f64));
 
     d1.prepare("UPDATE anime SET keywords = ?, exclude_keywords = ?, indexer = ? WHERE id = ?")
-        .bind(&params_vec)?
+        .bind(&params)?
         .run()
         .await?;
 
@@ -366,24 +335,17 @@ async fn handle_anime_update(mut req: Request, ctx: RouteContext<()>) -> worker:
         .bind(&[JsValue::from_f64(id as f64)])?
         .first::<Anime>(None)
         .await?;
-
-    Response::from_json(&serde_json::json!({"ok": true, "data": anime}))
+    json_ok(&serde_json::json!({"ok": true, "data": anime}))
 }
 
 async fn handle_anime_delete(_req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
-    let id: i32 = ctx
-        .param("id")
-        .ok_or_else(|| worker::Error::RustError("missing id".into()))?
-        .parse()
-        .map_err(|_| worker::Error::RustError("invalid id".into()))?;
-
+    let id = parse_id(&ctx)?;
     let d1 = ctx.d1("DB")?;
     d1.prepare("DELETE FROM anime WHERE id = ?")
         .bind(&[JsValue::from_f64(id as f64)])?
         .run()
         .await?;
-
-    Response::from_json(&serde_json::json!({"ok": true}))
+    json_ok(&serde_json::json!({"ok": true}))
 }
 
 // ============================================================================
@@ -404,13 +366,12 @@ pub async fn fetch(req: Request, env: Env, _ctx: worker::Context) -> worker::Res
         return handle_logout(req).await;
     }
 
-    // Check authentication for all other routes
     if !is_authenticated(&req, &password) {
-        if path.starts_with("/api/") {
-            return Response::from_json(&serde_json::json!({"ok": false, "error": "unauthorized"}))
-                .map(|r| r.with_status(401));
-        }
-        return Response::from_html(LOGIN_HTML);
+        return if path.starts_with("/api/") {
+            json_err("unauthorized", 401)
+        } else {
+            Response::from_html(LOGIN_HTML)
+        };
     }
 
     // Authenticated routes via Router
@@ -433,17 +394,11 @@ pub async fn fetch(req: Request, env: Env, _ctx: worker::Context) -> worker::Res
 
 #[event(scheduled)]
 async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    // 初始化配置
-    let config = &Config {
+    let config = Config {
         prowlarr: Prowlarr {
             url: env.var("PROWLARR_URL").unwrap().to_string(),
             api_key: env.var("PROWLARR_API_KEY").unwrap().to_string(),
-            indexer: env
-                .var("PROWLARR_INDEXER")
-                .unwrap()
-                .to_string()
-                .parse()
-                .unwrap(),
+            indexer: env.var("PROWLARR_INDEXER").unwrap().to_string().parse().unwrap(),
         },
         ntfy: Ntfy {
             enable: !env.var("NTFY_TOPIC").unwrap().to_string().trim().is_empty(),
@@ -451,33 +406,20 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         },
     };
 
-    // 查询所有监听的动画片
     let d1 = env.d1("DB").unwrap();
-    let statement = d1.prepare("SELECT * FROM anime");
-    let result = statement.all().await.unwrap();
-    let animes = &result.results::<Anime>().unwrap();
+    let animes: Vec<Anime> = d1.prepare("SELECT * FROM anime").all().await.unwrap().results().unwrap();
 
-    // Query existing download records
     let histories = history(&config.prowlarr).await.unwrap();
     let history_urls: HashSet<String> = histories
         .into_iter()
         .filter(|item| item.successful)
         .filter_map(|item| item.data.infoUrl)
         .collect();
-    let history_urls = Arc::new(history_urls);
 
-    // 创建异步任务的集合
-    let mut tasks = Vec::new();
-    for anime in animes {
-        let anime = anime.clone();
-        let history_urls = history_urls.clone();
-
-        // 为每个 anime 创建一个异步任务并添加到任务集合中
-        let task = process_anime(anime, config, history_urls);
-        tasks.push(task);
-    }
-
-    // 并发执行所有任务
+    let tasks: Vec<_> = animes
+        .into_iter()
+        .map(|anime| process_anime(anime, &config, &history_urls))
+        .collect();
     futures::future::join_all(tasks).await;
 }
 
@@ -496,39 +438,6 @@ const MANAGEMENT_HTML: &str = include_str!("templates/management.html");
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_cookies_single() {
-        let cookies = parse_cookies("session=abc123");
-        assert_eq!(cookies, vec![("session", "abc123")]);
-    }
-
-    #[test]
-    fn test_parse_cookies_multiple() {
-        let cookies = parse_cookies("session=abc123; theme=dark; lang=zh");
-        assert_eq!(cookies.len(), 3);
-        assert_eq!(cookies[0], ("session", "abc123"));
-        assert_eq!(cookies[1], ("theme", "dark"));
-        assert_eq!(cookies[2], ("lang", "zh"));
-    }
-
-    #[test]
-    fn test_parse_cookies_empty() {
-        let cookies = parse_cookies("");
-        assert!(cookies.is_empty());
-    }
-
-    #[test]
-    fn test_get_session_cookie_found() {
-        let cookies = [("session", "mysecret"), ("other", "val")];
-        assert_eq!(get_session_cookie(&cookies), Some("mysecret"));
-    }
-
-    #[test]
-    fn test_get_session_cookie_not_found() {
-        let cookies = [("theme", "dark"), ("lang", "zh")];
-        assert_eq!(get_session_cookie(&cookies), None);
-    }
 
     #[test]
     fn test_match_exclude_keywords_empty() {

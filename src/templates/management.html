@@ -75,68 +75,68 @@ tr:last-child td{border-bottom:none}
 </div>
 <script>
 const API='/api/anime';
+const $=id=>document.getElementById(id);
 let data=[];
+
 async function load(){
     const r=await fetch(API);
     if(!r.ok){window.location='/';return;}
-    const j=await r.json();
-    data=j.data||[];render();
+    data=(await r.json()).data||[];
+    render();
 }
+
 function render(){
-    const tb=document.getElementById('tb');
-    const em=document.getElementById('empty');
-    if(!data.length){tb.innerHTML='';em.style.display='block';return;}
-    em.style.display='none';
-    tb.innerHTML=data.map(a=>`<tr>
+    const tb=$('tb'),em=$('empty');
+    em.style.display=data.length?'none':'block';
+    tb.innerHTML=data.length?data.map(a=>`<tr>
         <td>${esc(a.keywords)}</td>
         <td>${esc(a.exclude_keywords||'')}</td>
         <td>${a.indexer??'-'}</td>
         <td class="actions">
-            <button class="btn-edit" onclick="editAnime(${a.id})">Edit</button>
+            <button class="btn-edit" onclick="showModal(${a.id})">Edit</button>
             <button class="btn-del" onclick="delAnime(${a.id})">Delete</button>
-        </td></tr>`).join('');
+        </td></tr>`).join(''):'';
 }
+
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
 function showModal(id){
-    document.getElementById('ov').classList.add('active');
-    if(id!=null){
-        const a=data.find(x=>x.id===id);
-        document.getElementById('mt').textContent='Edit Subscription';
-        document.getElementById('eid').value=a.id;
-        document.getElementById('kw').value=a.keywords;
-        document.getElementById('ek').value=a.exclude_keywords||'';
-        document.getElementById('idx').value=a.indexer||'';
-    }else{
-        document.getElementById('mt').textContent='Add Subscription';
-        document.getElementById('eid').value='';
-        document.getElementById('kw').value='';
-        document.getElementById('ek').value='';
-        document.getElementById('idx').value='';
-    }
-    document.getElementById('kw').focus();
+    $('ov').classList.add('active');
+    const isEdit=id!=null;
+    const a=isEdit?data.find(x=>x.id===id):{};
+    $('mt').textContent=isEdit?'Edit Subscription':'Add Subscription';
+    $('eid').value=a.id||'';
+    $('kw').value=a.keywords||'';
+    $('ek').value=a.exclude_keywords||'';
+    $('idx').value=a.indexer||'';
+    $('kw').focus();
 }
-function hideModal(){document.getElementById('ov').classList.remove('active');}
+
+function hideModal(){$('ov').classList.remove('active');}
+
 async function saveAnime(){
-    const id=document.getElementById('eid').value;
+    const id=$('eid').value;
+    const keywords=$('kw').value.trim();
+    if(!keywords){alert('Keywords required');return;}
     const body={
-        keywords:document.getElementById('kw').value.trim(),
-        exclude_keywords:document.getElementById('ek').value.trim(),
-        indexer:document.getElementById('idx').value?Number(document.getElementById('idx').value):null
+        keywords,
+        exclude_keywords:$('ek').value.trim(),
+        indexer:$('idx').value?Number($('idx').value):null
     };
-    if(!body.keywords){alert('Keywords required');return;}
     const url=id?`${API}/${id}`:API;
-    const method=id?'PUT':'POST';
-    await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    await fetch(url,{method:id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     hideModal();load();
 }
+
 async function delAnime(id){
     if(!confirm('Delete this subscription?'))return;
     await fetch(`${API}/${id}`,{method:'DELETE'});load();
 }
-function editAnime(id){showModal(id);}
+
 async function logout(){
     await fetch('/logout',{method:'POST'});window.location='/';
 }
+
 load();
 </script>
 </body>
