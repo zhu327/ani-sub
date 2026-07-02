@@ -223,6 +223,13 @@ fn get_session_cookie<'a>(cookies: &'a [(&'a str, &'a str)]) -> Option<&'a str> 
         .map(|(_, v)| *v)
 }
 
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 fn is_authenticated(req: &Request, password: &str) -> bool {
     let cookie_header = match req.headers().get("Cookie") {
         Ok(Some(h)) => h,
@@ -230,7 +237,7 @@ fn is_authenticated(req: &Request, password: &str) -> bool {
     };
     let cookies = parse_cookies(&cookie_header);
     get_session_cookie(&cookies)
-        .map(|s| s == password)
+        .map(|s| constant_time_eq(s, password))
         .unwrap_or(false)
 }
 
@@ -258,7 +265,7 @@ async fn handle_login(mut req: Request, env: Env) -> worker::Result<Response> {
     let body: LoginRequest = req.json().await?;
     let password = env.var("AUTH_PASSWORD")?.to_string();
 
-    if body.password != password {
+    if !constant_time_eq(&body.password, &password) {
         return Response::from_json(&serde_json::json!({"ok": false, "error": "密码错误"}))
             .map(|r| r.with_status(401));
     }
@@ -271,7 +278,7 @@ async fn handle_login(mut req: Request, env: Env) -> worker::Result<Response> {
     headers.set("Set-Cookie", &cookie)?;
 
     Response::from_json(&serde_json::json!({"ok": true}))
-        .map(|r| r.with_status(303).with_headers(headers))
+        .map(|r| r.with_headers(headers))
 }
 
 async fn handle_logout(_req: Request) -> worker::Result<Response> {
@@ -295,20 +302,28 @@ async fn handle_anime_list(_req: Request, ctx: RouteContext<()>) -> worker::Resu
     Response::from_json(&serde_json::json!({"ok": true, "data": animes}))
 }
 
-async fn handle_anime_create(mut req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
-    let input: AnimeInput = req.json().await?;
-    let d1 = ctx.d1("DB")?;
-
-    let exclude = input.exclude_keywords.unwrap_or_default();
+fn anime_params(input: &AnimeInput) -> [JsValue; 3] {
     let indexer_val = match input.indexer {
         Some(i) => JsValue::from_f64(i as f64),
         None => JsValue::null(),
     };
-    let params = [
+    [
         JsValue::from_str(&input.keywords),
-        JsValue::from_str(&exclude),
+        JsValue::from_str(input.exclude_keywords.as_deref().unwrap_or_default()),
         indexer_val,
-    ];
+    ]
+}
+
+async fn handle_anime_create(mut req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
+    let input: AnimeInput = req.json().await?;
+
+    if input.keywords.trim().is_empty() {
+        return Response::from_json(&serde_json::json!({"ok": false, "error": "keywords不能为空"}))
+            .map(|r| r.with_status(400));
+    }
+
+    let d1 = ctx.d1("DB")?;
+    let params = anime_params(&input);
 
     d1.prepare("INSERT INTO anime (keywords, exclude_keywords, indexer) VALUES (?, ?, ?)")
         .bind(&params)?
@@ -331,22 +346,18 @@ async fn handle_anime_update(mut req: Request, ctx: RouteContext<()>) -> worker:
         .map_err(|_| worker::Error::RustError("invalid id".into()))?;
 
     let input: AnimeInput = req.json().await?;
-    let d1 = ctx.d1("DB")?;
 
-    let exclude = input.exclude_keywords.unwrap_or_default();
-    let indexer_val = match input.indexer {
-        Some(i) => JsValue::from_f64(i as f64),
-        None => JsValue::null(),
-    };
-    let params = [
-        JsValue::from_str(&input.keywords),
-        JsValue::from_str(&exclude),
-        indexer_val,
-        JsValue::from_f64(id as f64),
-    ];
+    if input.keywords.trim().is_empty() {
+        return Response::from_json(&serde_json::json!({"ok": false, "error": "keywords不能为空"}))
+            .map(|r| r.with_status(400));
+    }
+
+    let d1 = ctx.d1("DB")?;
+    let mut params_vec: Vec<JsValue> = anime_params(&input).into();
+    params_vec.push(JsValue::from_f64(id as f64));
 
     d1.prepare("UPDATE anime SET keywords = ?, exclude_keywords = ?, indexer = ? WHERE id = ?")
-        .bind(&params)?
+        .bind(&params_vec)?
         .run()
         .await?;
 
@@ -395,6 +406,10 @@ pub async fn fetch(req: Request, env: Env, _ctx: worker::Context) -> worker::Res
 
     // Check authentication for all other routes
     if !is_authenticated(&req, &password) {
+        if path.starts_with("/api/") {
+            return Response::from_json(&serde_json::json!({"ok": false, "error": "unauthorized"}))
+                .map(|r| r.with_status(401));
+        }
         return Response::from_html(LOGIN_HTML);
     }
 
@@ -470,192 +485,9 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 // HTML templates
 // ============================================================================
 
-const LOGIN_HTML: &str = r#"<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Anime Subscriptions</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;display:flex;justify-content:center;align-items:center;min-height:100vh}
-.card{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.1);width:100%;max-width:360px}
-h2{text-align:center;margin-bottom:1.5rem;color:#333}
-input[type=password]{width:100%;padding:12px;border:1px solid #ddd;border-radius:8px;font-size:16px;margin-bottom:1rem}
-input:focus{outline:none;border-color:#4a90d9}
-button{width:100%;padding:12px;background:#4a90d9;color:#fff;border:none;border-radius:8px;font-size:16px;cursor:pointer}
-button:hover{background:#357abd}
-.error{color:#e74c3c;text-align:center;margin-top:.5rem;display:none;font-size:14px}
-</style>
-</head>
-<body>
-<div class="card">
-<h2>🔒 Anime Subscriptions</h2>
-<form id="f">
-<input type="password" id="p" placeholder="Password" autofocus>
-<button type="submit">Login</button>
-<p class="error" id="e"></p>
-</form>
-</div>
-<script>
-document.getElementById('f').addEventListener('submit',async e=>{
-    e.preventDefault();
-    const pw=document.getElementById('p').value;
-    const errEl=document.getElementById('e');
-    errEl.style.display='none';
-    try{
-        const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw}),redirect:'manual'});
-        if(r.status===303||r.ok){window.location='/';}
-        else{errEl.textContent='密码错误';errEl.style.display='block';}
-    }catch(err){errEl.textContent='网络错误';errEl.style.display='block';}
-});
-</script>
-</body>
-</html>"#;
+const LOGIN_HTML: &str = include_str!("templates/login.html");
 
-const MANAGEMENT_HTML: &str = r#"<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Anime Subscriptions</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;color:#333}
-header{background:#4a90d9;color:#fff;padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center}
-header h1{font-size:1.2rem;font-weight:600}
-header button{background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.3);padding:6px 16px;border-radius:6px;cursor:pointer;font-size:14px}
-header button:hover{background:rgba(255,255,255,.3)}
-.container{max-width:800px;margin:1.5rem auto;padding:0 1rem}
-.toolbar{display:flex;justify-content:flex-end;margin-bottom:1rem}
-.btn-add{background:#27ae60;color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px}
-.btn-add:hover{background:#219a52}
-table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 5px rgba(0,0,0,.08)}
-th,td{padding:12px 16px;text-align:left;border-bottom:1px solid #f0f0f0}
-th{background:#fafafa;font-weight:600;font-size:13px;color:#666}
-td{font-size:14px}
-tr:last-child td{border-bottom:none}
-.actions{white-space:nowrap}
-.actions button{border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-right:4px}
-.btn-edit{background:#eef;color:#4a90d9}
-.btn-edit:hover{background:#dde8ff}
-.btn-del{background:#fef0f0;color:#e74c3c}
-.btn-del:hover{background:#fde}
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;justify-content:center;align-items:center;z-index:100}
-.overlay.active{display:flex}
-.modal{background:#fff;padding:1.5rem;border-radius:12px;width:90%;max-width:450px;box-shadow:0 4px 20px rgba(0,0,0,.15)}
-.modal h3{margin-bottom:1rem;color:#333}
-.modal label{display:block;font-size:13px;color:#666;margin:12px 0 4px}
-.modal input{width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px}
-.modal input:focus{outline:none;border-color:#4a90d9}
-.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:1.5rem}
-.modal-actions button{padding:8px 20px;border-radius:6px;cursor:pointer;font-size:14px;border:1px solid #ddd}
-.btn-cancel{background:#fff;color:#666}
-.btn-cancel:hover{background:#f5f5f5}
-.btn-save{background:#4a90d9;color:#fff;border-color:#4a90d9}
-.btn-save:hover{background:#357abd}
-.empty{text-align:center;padding:3rem;color:#999}
-</style>
-</head>
-<body>
-<header>
-<h1>🎬 Anime Subscriptions</h1>
-<button onclick="logout()">Logout</button>
-</header>
-<div class="container">
-<div class="toolbar">
-<button class="btn-add" onclick="showModal()">+ Add</button>
-</div>
-<table>
-<thead><tr><th>Keywords</th><th>Exclude</th><th>Indexer</th><th style="width:120px">Actions</th></tr></thead>
-<tbody id="tb"></tbody>
-</table>
-<div id="empty" class="empty" style="display:none">No subscriptions yet</div>
-</div>
-<div class="overlay" id="ov" onclick="if(event.target===this)hideModal()">
-<div class="modal">
-<h3 id="mt">Add Subscription</h3>
-<input type="hidden" id="eid">
-<label>Keywords</label>
-<input id="kw" placeholder="e.g. LoliHouse 迷宫饭">
-<label>Exclude Keywords</label>
-<input id="ek" placeholder="Optional">
-<label>Indexer ID</label>
-<input id="idx" type="number" placeholder="Optional, uses default if empty">
-<div class="modal-actions">
-<button class="btn-cancel" onclick="hideModal()">Cancel</button>
-<button class="btn-save" onclick="saveAnime()">Save</button>
-</div>
-</div>
-</div>
-<script>
-const API='/api/anime';
-let data=[];
-async function load(){
-    const r=await fetch(API);
-    if(r.status===401||r.status===302){window.location='/';return;}
-    const j=await r.json();
-    data=j.data||[];render();
-}
-function render(){
-    const tb=document.getElementById('tb');
-    const em=document.getElementById('empty');
-    if(!data.length){tb.innerHTML='';em.style.display='block';return;}
-    em.style.display='none';
-    tb.innerHTML=data.map(a=>`<tr>
-        <td>${esc(a.keywords)}</td>
-        <td>${esc(a.exclude_keywords||'')}</td>
-        <td>${a.indexer??'-'}</td>
-        <td class="actions">
-            <button class="btn-edit" onclick="editAnime(${a.id})">Edit</button>
-            <button class="btn-del" onclick="delAnime(${a.id})">Delete</button>
-        </td></tr>`).join('');
-}
-function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-function showModal(id){
-    document.getElementById('ov').classList.add('active');
-    if(id!=null){
-        const a=data.find(x=>x.id===id);
-        document.getElementById('mt').textContent='Edit Subscription';
-        document.getElementById('eid').value=a.id;
-        document.getElementById('kw').value=a.keywords;
-        document.getElementById('ek').value=a.exclude_keywords||'';
-        document.getElementById('idx').value=a.indexer||'';
-    }else{
-        document.getElementById('mt').textContent='Add Subscription';
-        document.getElementById('eid').value='';
-        document.getElementById('kw').value='';
-        document.getElementById('ek').value='';
-        document.getElementById('idx').value='';
-    }
-    document.getElementById('kw').focus();
-}
-function hideModal(){document.getElementById('ov').classList.remove('active');}
-async function saveAnime(){
-    const id=document.getElementById('eid').value;
-    const body={
-        keywords:document.getElementById('kw').value.trim(),
-        exclude_keywords:document.getElementById('ek').value.trim(),
-        indexer:document.getElementById('idx').value?Number(document.getElementById('idx').value):null
-    };
-    if(!body.keywords){alert('Keywords required');return;}
-    const url=id?`${API}/${id}`:API;
-    const method=id?'PUT':'POST';
-    await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    hideModal();load();
-}
-async function delAnime(id){
-    if(!confirm('Delete this subscription?'))return;
-    await fetch(`${API}/${id}`,{method:'DELETE'});load();
-}
-function editAnime(id){showModal(id);}
-async function logout(){
-    await fetch('/logout',{method:'POST'});window.location='/';
-}
-load();
-</script>
-</body>
-</html>"#;
+const MANAGEMENT_HTML: &str = include_str!("templates/management.html");
 
 // ============================================================================
 // Tests
@@ -716,5 +548,25 @@ mod tests {
     #[test]
     fn test_match_exclude_keywords_case_insensitive() {
         assert!(match_exclude_keywords("LOLHouse Title", "lolhouse"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_equal() {
+        assert!(constant_time_eq("password123", "password123"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different() {
+        assert!(!constant_time_eq("password123", "password124"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_length() {
+        assert!(!constant_time_eq("short", "longer"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_empty() {
+        assert!(constant_time_eq("", ""));
     }
 }
