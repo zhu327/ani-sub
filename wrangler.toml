@@ -18,3 +18,4 @@ PROWLARR_URL = "your prowlarr url"
 PROWLARR_API_KEY = "your prowlarr api key"
 PROWLARR_INDEXER = "6"  # you prowlarr anime indexer
 NTFY_TOPIC = ""
+# AUTH_PASSWORD: use `wrangler secret put AUTH_PASSWORD` instead of putting it here
