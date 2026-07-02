@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use reqwest::header;
 use serde::{Deserialize, Serialize};
 use worker::wasm_bindgen::JsValue;
-use worker::{event, Env, Request, Response, RouteContext, Router, ScheduleContext, ScheduledEvent};
+use worker::{
+    event, Env, Request, Response, RouteContext, Router, ScheduleContext, ScheduledEvent,
+};
 
 struct Config {
     prowlarr: Prowlarr,
@@ -195,7 +197,10 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 fn is_authenticated(req: &Request, password: &str) -> bool {
@@ -262,7 +267,10 @@ async fn handle_login(mut req: Request, env: Env) -> worker::Result<Response> {
         return json_err("密码错误", 401);
     }
 
-    let cookie = format!("session={}; HttpOnly; Secure; SameSite=Strict; Path=/", body.password);
+    let cookie = format!(
+        "session={}; HttpOnly; Secure; SameSite=Strict; Path=/",
+        body.password
+    );
     let mut headers = worker::Headers::new();
     headers.set("Set-Cookie", &cookie)?;
     json_ok(&serde_json::json!({"ok": true})).map(|r| r.with_headers(headers))
@@ -283,7 +291,11 @@ async fn handle_index(_req: Request, _ctx: RouteContext<()>) -> worker::Result<R
 
 async fn handle_anime_list(_req: Request, ctx: RouteContext<()>) -> worker::Result<Response> {
     let d1 = ctx.d1("DB")?;
-    let animes: Vec<Anime> = d1.prepare("SELECT * FROM anime").all().await?.results::<Anime>()?;
+    let animes: Vec<Anime> = d1
+        .prepare("SELECT * FROM anime")
+        .all()
+        .await?
+        .results::<Anime>()?;
     json_ok(&serde_json::json!({"ok": true, "data": animes}))
 }
 
@@ -291,7 +303,10 @@ fn anime_params(input: &AnimeInput) -> [JsValue; 3] {
     [
         JsValue::from_str(&input.keywords),
         JsValue::from_str(input.exclude_keywords.as_deref().unwrap_or_default()),
-        input.indexer.map(|i| JsValue::from_f64(i as f64)).unwrap_or(JsValue::null()),
+        input
+            .indexer
+            .map(|i| JsValue::from_f64(i as f64))
+            .unwrap_or(JsValue::null()),
     ]
 }
 
@@ -381,9 +396,10 @@ pub async fn fetch(req: Request, env: Env, _ctx: worker::Context) -> worker::Res
         .post_async("/api/anime", handle_anime_create)
         .put_async("/api/anime/:id", handle_anime_update)
         .delete_async("/api/anime/:id", handle_anime_delete)
-        .or_else_any_method_async("/", |_req, _ctx| async move {
-            Response::from_html(LOGIN_HTML)
-        })
+        .or_else_any_method_async(
+            "/",
+            |_req, _ctx| async move { Response::from_html(LOGIN_HTML) },
+        )
         .run(req, env)
         .await
 }
@@ -398,7 +414,12 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         prowlarr: Prowlarr {
             url: env.var("PROWLARR_URL").unwrap().to_string(),
             api_key: env.var("PROWLARR_API_KEY").unwrap().to_string(),
-            indexer: env.var("PROWLARR_INDEXER").unwrap().to_string().parse().unwrap(),
+            indexer: env
+                .var("PROWLARR_INDEXER")
+                .unwrap()
+                .to_string()
+                .parse()
+                .unwrap(),
         },
         ntfy: Ntfy {
             enable: !env.var("NTFY_TOPIC").unwrap().to_string().trim().is_empty(),
@@ -407,7 +428,13 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     };
 
     let d1 = env.d1("DB").unwrap();
-    let animes: Vec<Anime> = d1.prepare("SELECT * FROM anime").all().await.unwrap().results().unwrap();
+    let animes: Vec<Anime> = d1
+        .prepare("SELECT * FROM anime")
+        .all()
+        .await
+        .unwrap()
+        .results()
+        .unwrap();
 
     let histories = history(&config.prowlarr).await.unwrap();
     let history_urls: HashSet<String> = histories
@@ -446,7 +473,10 @@ mod tests {
 
     #[test]
     fn test_match_exclude_keywords_match() {
-        assert!(match_exclude_keywords("LoliHouse 迷宫饭 1080p", "LoliHouse"));
+        assert!(match_exclude_keywords(
+            "LoliHouse 迷宫饭 1080p",
+            "LoliHouse"
+        ));
     }
 
     #[test]
@@ -477,5 +507,18 @@ mod tests {
     #[test]
     fn test_constant_time_eq_empty() {
         assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn test_management_html_has_mobile_breakpoint() {
+        assert!(MANAGEMENT_HTML.contains("@media (max-width:600px)"));
+    }
+
+    #[test]
+    fn test_management_html_renders_mobile_table_labels() {
+        assert!(MANAGEMENT_HTML.contains("data-label=\"Keywords\""));
+        assert!(MANAGEMENT_HTML.contains("data-label=\"Exclude\""));
+        assert!(MANAGEMENT_HTML.contains("data-label=\"Indexer\""));
+        assert!(MANAGEMENT_HTML.contains("data-label=\"Actions\""));
     }
 }
