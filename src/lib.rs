@@ -147,8 +147,10 @@ async fn download(
     Ok(())
 }
 
+const NTFY_PROXY_URL: &str = "https://ntfy.zhu327.deno.net";
+
 async fn send_message(ntfy: &Ntfy, message: &str) -> std::result::Result<(), reqwest::Error> {
-    let url = format!("https://ntfy.sh/{}", ntfy.topic);
+    let url = format!("{}/{}", NTFY_PROXY_URL, ntfy.topic);
 
     let client = reqwest::Client::new();
     client
@@ -190,36 +192,6 @@ async fn process_anime(
 }
 
 // ============================================================================
-// Auth helpers
-// ============================================================================
-
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
-fn is_authenticated(req: &Request, password: &str) -> bool {
-    let cookie_header = match req.headers().get("Cookie") {
-        Ok(Some(h)) => h,
-        _ => return false,
-    };
-    cookie_header
-        .split(';')
-        .filter_map(|c| {
-            let mut parts = c.trim().splitn(2, '=');
-            Some((parts.next()?.trim(), parts.next()?.trim()))
-        })
-        .find(|(k, _)| *k == "session")
-        .map(|(_, v)| constant_time_eq(v, password))
-        .unwrap_or(false)
-}
-
-// ============================================================================
 // Response helpers
 // ============================================================================
 
@@ -244,11 +216,6 @@ fn parse_id(ctx: &RouteContext<()>) -> worker::Result<i32> {
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
-struct LoginRequest {
-    password: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct AnimeInput {
     keywords: String,
     exclude_keywords: Option<String>,
@@ -258,32 +225,6 @@ struct AnimeInput {
 // ============================================================================
 // Route handlers
 // ============================================================================
-
-async fn handle_login(mut req: Request, env: Env) -> worker::Result<Response> {
-    let body: LoginRequest = req.json().await?;
-    let password = env.var("AUTH_PASSWORD")?.to_string();
-
-    if !constant_time_eq(&body.password, &password) {
-        return json_err("密码错误", 401);
-    }
-
-    let cookie = format!(
-        "session={}; HttpOnly; Secure; SameSite=Strict; Path=/",
-        body.password
-    );
-    let mut headers = worker::Headers::new();
-    headers.set("Set-Cookie", &cookie)?;
-    json_ok(&serde_json::json!({"ok": true})).map(|r| r.with_headers(headers))
-}
-
-async fn handle_logout(_req: Request) -> worker::Result<Response> {
-    let mut headers = worker::Headers::new();
-    headers.set(
-        "Set-Cookie",
-        "session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
-    )?;
-    Response::empty().map(|r| r.with_headers(headers))
-}
 
 async fn handle_index(_req: Request, _ctx: RouteContext<()>) -> worker::Result<Response> {
     Response::from_html(MANAGEMENT_HTML)
@@ -369,37 +310,15 @@ async fn handle_anime_delete(_req: Request, ctx: RouteContext<()>) -> worker::Re
 
 #[event(fetch)]
 pub async fn fetch(req: Request, env: Env, _ctx: worker::Context) -> worker::Result<Response> {
-    let password = env.var("AUTH_PASSWORD")?.to_string();
-    let path = req.path();
-    let method = req.method();
-
-    // Public routes (no auth required)
-    if path == "/login" && method == worker::Method::Post {
-        return handle_login(req, env).await;
-    }
-    if path == "/logout" && method == worker::Method::Post {
-        return handle_logout(req).await;
-    }
-
-    if !is_authenticated(&req, &password) {
-        return if path.starts_with("/api/") {
-            json_err("unauthorized", 401)
-        } else {
-            Response::from_html(LOGIN_HTML)
-        };
-    }
-
-    // Authenticated routes via Router
     Router::new()
         .get_async("/", handle_index)
         .get_async("/api/anime", handle_anime_list)
         .post_async("/api/anime", handle_anime_create)
         .put_async("/api/anime/:id", handle_anime_update)
         .delete_async("/api/anime/:id", handle_anime_delete)
-        .or_else_any_method_async(
-            "/",
-            |_req, _ctx| async move { Response::from_html(LOGIN_HTML) },
-        )
+        .or_else_any_method_async("/", |_req, _ctx| async move {
+            Response::error("Not Found", 404)
+        })
         .run(req, env)
         .await
 }
@@ -454,8 +373,6 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 // HTML templates
 // ============================================================================
 
-const LOGIN_HTML: &str = include_str!("templates/login.html");
-
 const MANAGEMENT_HTML: &str = include_str!("templates/management.html");
 
 // ============================================================================
@@ -487,26 +404,6 @@ mod tests {
     #[test]
     fn test_match_exclude_keywords_case_insensitive() {
         assert!(match_exclude_keywords("LOLHouse Title", "lolhouse"));
-    }
-
-    #[test]
-    fn test_constant_time_eq_equal() {
-        assert!(constant_time_eq("password123", "password123"));
-    }
-
-    #[test]
-    fn test_constant_time_eq_different() {
-        assert!(!constant_time_eq("password123", "password124"));
-    }
-
-    #[test]
-    fn test_constant_time_eq_different_length() {
-        assert!(!constant_time_eq("short", "longer"));
-    }
-
-    #[test]
-    fn test_constant_time_eq_empty() {
-        assert!(constant_time_eq("", ""));
     }
 
     #[test]

@@ -68,7 +68,6 @@ tr:last-child td{border-bottom:none}
 <body>
 <header>
 <h1>🎬 Anime Subscriptions</h1>
-<button onclick="logout()">Logout</button>
 </header>
 <div class="container">
 <div class="toolbar">
@@ -103,7 +102,7 @@ let data=[];
 
 async function load(){
     const r=await fetch(API);
-    if(!r.ok){window.location='/';return;}
+    if(!r.ok){alert('加载失败 (HTTP '+r.status+')');return;}
     data=(await r.json()).data||[];
     render();
 }
@@ -154,10 +153,6 @@ async function saveAnime(){
 async function delAnime(id){
     if(!confirm('Delete this subscription?'))return;
     await fetch(`${API}/${id}`,{method:'DELETE'});load();
-}
-
-async function logout(){
-    await fetch('/logout',{method:'POST'});window.location='/';
 }
 
 load();
